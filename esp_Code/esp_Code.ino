@@ -11,11 +11,34 @@ const uint16_t port = 5005;
 WiFiClient client;
 Adafruit_MPU6050 mpu;
 
-const int leftBtnPin = 14;    // D5
-const int rightBtnPin = 12;   // D6
+// GPIO pins
+const int leftBtnPin = 14;     // D5
+const int rightBtnPin = 12;    // D6
 const int recenterBtnPin = 13; // D7
 
-float offsetX = 0, offsetY = 0;
+// Offsets for recentering tilt
+float offsetAX = 0, offsetAY = 0;
+const float noiseThreshold = 0.15; // deadzone for accelerometer
+
+void calibrateAccel() {
+  Serial.println("Calibrating accel... Keep device level");
+  const int samples = 200;
+  float sumX = 0, sumY = 0;
+
+  for (int i = 0; i < samples; i++) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    sumX += a.acceleration.x;
+    sumY += a.acceleration.y;
+    delay(5);
+  }
+
+  offsetAX = sumX / samples;
+  offsetAY = sumY / samples;
+
+  Serial.print("OffsetAX: "); Serial.println(offsetAX, 3);
+  Serial.print("OffsetAY: "); Serial.println(offsetAY, 3);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -31,12 +54,14 @@ void setup() {
     while (1);
   }
 
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
   pinMode(leftBtnPin, INPUT_PULLUP);
   pinMode(rightBtnPin, INPUT_PULLUP);
   pinMode(recenterBtnPin, INPUT_PULLUP);
+
+  calibrateAccel();
 
   if (!client.connect(host, port)) {
     Serial.println("PC connection failed");
@@ -49,20 +74,27 @@ void loop() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
+  // Recenter on button press
   if (digitalRead(recenterBtnPin) == LOW) {
-    offsetX = g.gyro.x;
-    offsetY = g.gyro.y;
+    calibrateAccel();
+    delay(500); // prevent multiple recalibrations
   }
 
   int leftClick = (digitalRead(leftBtnPin) == LOW) ? 1 : 0;
   int rightClick = (digitalRead(rightBtnPin) == LOW) ? 1 : 0;
 
-  // Send gyro data minus offset for recentering
-  String data = String(g.gyro.x - offsetX) + "," + 
-                String(g.gyro.y - offsetY) + "," + 
-                String(leftClick) + "," + 
-                String(rightClick) + "\n";
+  // Subtract offsets
+  float ax = a.acceleration.x - offsetAX;
+  float ay = a.acceleration.y - offsetAY;
+
+  // Apply deadzone
+  if (fabs(ax) < noiseThreshold) ax = 0;
+  if (fabs(ay) < noiseThreshold) ay = 0;
+
+  // Send accel data instead of gyro
+  String data = String(ax, 3) + "," + String(ay, 3) + "," +
+                String(leftClick) + "," + String(rightClick) + "\n";
   client.print(data);
 
-  delay(10); // ~100Hz
+  delay(10); // ~100Hz update rate
 }
