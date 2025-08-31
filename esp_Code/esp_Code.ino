@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <math.h>
 
 const char* ssid = "VARAD";
 const char* password = "Adventure4@4242";
@@ -16,29 +17,9 @@ const int leftBtnPin = 14;     // D5
 const int rightBtnPin = 12;    // D6
 const int recenterBtnPin = 13; // D7
 
-// Offsets for recentering tilt
-float offsetAX = 0, offsetAY = 0;
-const float noiseThreshold = 0.15; // deadzone for accelerometer
-
-void calibrateAccel() {
-  Serial.println("Calibrating accel... Keep device level");
-  const int samples = 200;
-  float sumX = 0, sumY = 0;
-
-  for (int i = 0; i < samples; i++) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    sumX += a.acceleration.x;
-    sumY += a.acceleration.y;
-    delay(5);
-  }
-
-  offsetAX = sumX / samples;
-  offsetAY = sumY / samples;
-
-  Serial.print("OffsetAX: "); Serial.println(offsetAX, 3);
-  Serial.print("OffsetAY: "); Serial.println(offsetAY, 3);
-}
+// Complementary filter
+float fusedX = 0, fusedY = 0;
+unsigned long lastTime = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -55,13 +36,14 @@ void setup() {
   }
 
   mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
   pinMode(leftBtnPin, INPUT_PULLUP);
   pinMode(rightBtnPin, INPUT_PULLUP);
   pinMode(recenterBtnPin, INPUT_PULLUP);
 
-  calibrateAccel();
+  lastTime = millis();
 
   if (!client.connect(host, port)) {
     Serial.println("PC connection failed");
@@ -74,27 +56,32 @@ void loop() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
-  // Recenter on button press
-  if (digitalRead(recenterBtnPin) == LOW) {
-    calibrateAccel();
-    delay(500); // prevent multiple recalibrations
-  }
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0;
+  lastTime = now;
 
+  // --- Calculate tilt from accelerometer ---
+  float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180 / PI;
+  float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y*a.acceleration.y + a.acceleration.z*a.acceleration.z)) * 180 / PI;
+
+  // --- Integrate gyro for relative angles (deg/s * time) ---
+  static float gyroAngleX = 0, gyroAngleY = 0;
+  gyroAngleX += g.gyro.x * dt * 180 / PI;
+  gyroAngleY += g.gyro.y * dt * 180 / PI;
+
+  // --- Complementary filter fusion ---
+  const float alpha = 0.98; // 98% gyro, 2% accel
+  fusedX = alpha * (fusedX + g.gyro.x * dt * 180 / PI) + (1 - alpha) * accAngleX;
+  fusedY = alpha * (fusedY + g.gyro.y * dt * 180 / PI) + (1 - alpha) * accAngleY;
+
+  // --- Button handling ---
   int leftClick = (digitalRead(leftBtnPin) == LOW) ? 1 : 0;
   int rightClick = (digitalRead(rightBtnPin) == LOW) ? 1 : 0;
 
-  // Subtract offsets
-  float ax = a.acceleration.x - offsetAX;
-  float ay = a.acceleration.y - offsetAY;
-
-  // Apply deadzone
-  if (fabs(ax) < noiseThreshold) ax = 0;
-  if (fabs(ay) < noiseThreshold) ay = 0;
-
-  // Send accel data instead of gyro
-  String data = String(ax, 3) + "," + String(ay, 3) + "," +
+  // --- Send fused angles ---
+  String data = String(fusedX, 3) + "," + String(fusedY, 3) + "," +
                 String(leftClick) + "," + String(rightClick) + "\n";
   client.print(data);
 
-  delay(10); // ~100Hz update rate
+  delay(1); // ~100Hz
 }
